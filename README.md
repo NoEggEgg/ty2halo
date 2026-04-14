@@ -44,7 +44,7 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/fghwett/typecho_to_halo.git
+git clone https://github.com/NoEggEgg/ty2halo.git
 cd typecho_to_halo
 ```
 
