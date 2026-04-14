@@ -1,0 +1,6 @@
+.idea/
+_tmp/
+migration-guide.md
+config.yaml
+# Added by goreleaser init:
+dist/
