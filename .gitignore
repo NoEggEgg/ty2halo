@@ -2,5 +2,8 @@
 _tmp/
 migration-guide.md
 config.yaml
+*.exe
+*.log
+go.work.sum
 # Added by goreleaser init:
 dist/
