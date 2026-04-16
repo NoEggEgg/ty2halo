@@ -30,6 +30,8 @@ func NewTypecho(conf *config.Typecho) (*Typecho, error) {
 		open = postgres.Open
 	case "sqlite3":
 		open = sqlite.Open
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s, supported: mysql, postgres, sqlite3", conf.Type)
 	}
 	dialector := open(conf.Dsn)
 

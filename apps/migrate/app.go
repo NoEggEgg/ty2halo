@@ -9,6 +9,7 @@ import (
 	"github.com/fghwett/typecho-to-halo/service"
 	"github.com/spf13/cast"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -22,13 +23,19 @@ type App struct {
 
 	typechoAttachments []*model.TypechoContents
 
-	haloTagMap      sync.Map
-	haloCategoryMap sync.Map
+	haloTagMap      sync.Map // key: mid(uint32) 或 slug(string) -> *extensionsdk.Tag
+	haloCategoryMap sync.Map // key: mid(uint32) 或 slug(string) -> *extensionsdk.Category
 	haloFileMap     sync.Map
-	haloPostMap     sync.Map
-	haloPageMap     sync.Map
-	haloCommentMap  sync.Map
-	haloReplyMap    sync.Map
+	haloPostMap     sync.Map // key: cid(uint32) 或 slug(string) -> *consolesdk.Post
+	haloPageMap     sync.Map // key: cid(uint32) 或 slug(string) -> *consolesdk.SinglePage
+	haloCommentMap  sync.Map // key: coid -> *consolesdk.Comment
+	haloReplyMap    sync.Map // key: coid -> *consolesdk.Reply
+
+	// 去重 map：slug -> true
+	haloTagSlugMap      sync.Map
+	haloCategorySlugMap sync.Map
+	haloPostSlugMap     sync.Map
+	haloPageSlugMap     sync.Map
 }
 
 func NewApp(conf *config.Config) (*App, error) {
@@ -36,20 +43,20 @@ func NewApp(conf *config.Config) (*App, error) {
 		conf: conf,
 	}
 
-	if t, e := service.NewTypecho(conf.Typecho); e != nil {
+	t, e := service.NewTypecho(conf.Typecho)
+	if e != nil {
 		return nil, e
-	} else {
-		a.typecho = t
 	}
+	a.typecho = t
 
 	slog.Info("配置信息", slog.Any("conf", conf))
 
-	if f, e := service.NewFileManager(conf.FileManager); e != nil {
+	f, e := service.NewFileManager(conf.FileManager)
+	if e != nil {
 		return nil, e
-	} else {
-		slog.Info("文件管理器", slog.Any("conf", conf.FileManager))
-		a.fileManager = f
 	}
+	slog.Info("文件管理器", slog.Any("conf", conf.FileManager))
+	a.fileManager = f
 
 	a.halo = service.NewHalo(conf.Halo)
 
@@ -57,6 +64,11 @@ func NewApp(conf *config.Config) (*App, error) {
 }
 
 func (app *App) Run() error {
+	// 预加载已有数据，用于去重
+	if err := app.loadExistingData(); err != nil {
+		slog.Warn("加载已有数据失败，跳过去重检查", slog.Any("err", err))
+	}
+
 	actions := []*Action{
 		NewAction("迁移标签", app.migrateTags),
 		NewAction("迁移分类", app.migrateCategories),
@@ -69,6 +81,92 @@ func (app *App) Run() error {
 	return app.doActions(actions)
 }
 
+func (app *App) loadExistingData() error {
+	slog.Info("开始加载 Halo 已有数据...")
+
+	// 加载已有标签（按 slug 索引，用于去重）
+	tags, err := app.halo.GetTags()
+	if err != nil {
+		return fmt.Errorf("加载标签失败: %w", err)
+	}
+	for _, tag := range tags {
+		app.haloTagMap.Store(tag.Spec.Slug, &tag)
+		app.haloTagSlugMap.Store(tag.Spec.Slug, true)
+	}
+	slog.Info("已加载标签", slog.Int("count", len(tags)))
+
+	// 加载已有分类（按 slug 索引，用于去重）
+	categories, err := app.halo.GetCategories()
+	if err != nil {
+		return fmt.Errorf("加载分类失败: %w", err)
+	}
+	for _, category := range categories {
+		app.haloCategoryMap.Store(category.Spec.Slug, &category)
+		app.haloCategorySlugMap.Store(category.Spec.Slug, true)
+	}
+	slog.Info("已加载分类", slog.Int("count", len(categories)))
+
+	// 加载已有文章
+	posts, err := app.halo.GetPosts()
+	if err != nil {
+		return fmt.Errorf("加载文章失败: %w", err)
+	}
+	for _, post := range posts {
+		app.haloPostMap.Store(post.Post.Spec.Slug, &post.Post)
+		app.haloPostSlugMap.Store(post.Post.Spec.Slug, true)
+	}
+	slog.Info("已加载文章", slog.Int("count", len(posts)))
+
+	// 加载已有页面
+	pages, err := app.halo.GetPages()
+	if err != nil {
+		return fmt.Errorf("加载页面失败: %w", err)
+	}
+	for _, page := range pages {
+		app.haloPageMap.Store(page.Page.Spec.Slug, &page.Page)
+		app.haloPageSlugMap.Store(page.Page.Spec.Slug, true)
+	}
+	slog.Info("已加载页面", slog.Int("count", len(pages)))
+
+	// 建立 Typecho mid → Halo Tag/Category 映射（通过 slug 桥接）
+	// 这样 migratePosts 用 relationShip.Mid 查找时能找到对应的 Halo 对象
+	typechoTags, _ := app.typecho.GetTags()
+	for _, typechoTag := range typechoTags {
+		slug := cast.ToString(typechoTag.Slug)
+		if value, ok := app.haloTagMap.Load(slug); ok {
+			app.haloTagMap.Store(typechoTag.Mid, value) // mid -> Halo Tag（兼容原代码查询方式）
+		}
+	}
+
+	typechoCategories, _ := app.typecho.GetCategories()
+	for _, typechoCategory := range typechoCategories {
+		slug := cast.ToString(typechoCategory.Slug)
+		if value, ok := app.haloCategoryMap.Load(slug); ok {
+			app.haloCategoryMap.Store(typechoCategory.Mid, value) // mid -> Halo Category（兼容原代码查询方式）
+		}
+	}
+
+	// 建立 Typecho cid → Halo Post/Page 映射（通过 slug 桥接）
+	// 评论迁移用 contentId（cid）查找 Post/Page 的 Metadata.Name
+	typechoPosts, _ := app.typecho.GetPosts()
+	for _, typechoPost := range typechoPosts {
+		slug := cast.ToString(typechoPost.Slug)
+		if value, ok := app.haloPostMap.Load(slug); ok {
+			app.haloPostMap.Store(typechoPost.Cid, value) // cid -> Halo Post
+		}
+	}
+
+	typechoPagesList, _ := app.typecho.GetPage()
+	for _, typechoPage := range typechoPagesList {
+		slug := cast.ToString(typechoPage.Slug)
+		if value, ok := app.haloPageMap.Load(slug); ok {
+			app.haloPageMap.Store(typechoPage.Cid, value) // cid -> Halo Page
+		}
+	}
+
+	return nil
+}
+
 func (app *App) migrateTags() error {
 	typechoTags, err := app.typecho.GetTags()
 	if err != nil {
@@ -77,10 +175,24 @@ func (app *App) migrateTags() error {
 
 	var tag *extensionsdk.Tag
 	for _, typechoTag := range typechoTags {
-		if tag, err = app.halo.AddTag(cast.ToString(typechoTag.Name), cast.ToString(typechoTag.Slug)); err != nil {
+		slug := cast.ToString(typechoTag.Slug)
+
+		// 去重检查
+		if _, ok := app.haloTagSlugMap.Load(slug); ok {
+			slog.Info("标签已存在，跳过", slog.String("slug", slug), slog.String("name", cast.ToString(typechoTag.Name)))
+			// 仍需存入 map 以便文章关联
+			if existing, ok := app.haloTagMap.Load(slug); ok {
+				// 用 mid 作为 key 重新存储
+				app.haloTagMap.Store(typechoTag.Mid, existing)
+			}
+			continue
+		}
+
+		if tag, err = app.halo.AddTag(cast.ToString(typechoTag.Name), slug); err != nil {
 			return err
 		}
 		app.haloTagMap.Store(typechoTag.Mid, tag)
+		app.haloTagSlugMap.Store(slug, true)
 	}
 
 	return nil
@@ -94,10 +206,20 @@ func (app *App) migrateCategories() error {
 
 	var category *extensionsdk.Category
 	for _, typechoCategory := range typechoCategories {
-		if category, err = app.halo.AddCategory(cast.ToString(typechoCategory.Name), cast.ToString(typechoCategory.Slug), cast.ToString(typechoCategory.Description), cast.ToInt32(typechoCategory.Order_)); err != nil {
+		slug := cast.ToString(typechoCategory.Slug)
+
+		// 去重检查
+		if _, ok := app.haloCategorySlugMap.Load(slug); ok {
+			slog.Info("分类已存在，跳过", slog.String("slug", slug), slog.String("name", cast.ToString(typechoCategory.Name)))
+			// mid -> Halo Category 映射已由 loadExistingData 建立
+			continue
+		}
+
+		if category, err = app.halo.AddCategory(cast.ToString(typechoCategory.Name), slug, cast.ToString(typechoCategory.Description), cast.ToInt32(typechoCategory.Order_)); err != nil {
 			return err
 		}
 		app.haloCategoryMap.Store(typechoCategory.Mid, category)
+		app.haloCategorySlugMap.Store(slug, true)
 	}
 
 	cache := make(map[uint32][]string)
@@ -189,6 +311,17 @@ func (app *App) migratePosts() error {
 
 	var post *consolesdk.Post
 	for _, typechoPost := range typechoPosts {
+		slug := cast.ToString(typechoPost.Slug)
+
+		// 去重检查
+		if _, ok := app.haloPostSlugMap.Load(slug); ok {
+			slog.Info("文章已存在，跳过", slog.String("slug", slug), slog.String("title", cast.ToString(typechoPost.Title)))
+			// cid -> Halo Post 映射：通过 slug 桥接（评论迁移需要 Post.Metadata.Name）
+			if value, ok := app.haloPostMap.Load(slug); ok {
+				app.haloPostMap.Store(typechoPost.Cid, value)
+			}
+			continue
+		}
 		var tags, categories []string
 		for _, relationShip := range relationShips {
 			if relationShip.Cid != typechoPost.Cid {
@@ -246,6 +379,7 @@ func (app *App) migratePosts() error {
 		}
 
 		app.haloPostMap.Store(typechoPost.Cid, post)
+		app.haloPostSlugMap.Store(slug, true)
 	}
 
 	return nil
@@ -259,6 +393,17 @@ func (app *App) migratePages() error {
 
 	var haloPage *consolesdk.SinglePage
 	for _, typechoPage := range typechoPages {
+		slug := cast.ToString(typechoPage.Slug)
+
+		// 去重检查
+		if _, ok := app.haloPageSlugMap.Load(slug); ok {
+			slog.Info("页面已存在，跳过", slog.String("slug", slug), slog.String("title", cast.ToString(typechoPage.Title)))
+			// cid -> Halo Page 映射：通过 slug 桥接（评论迁移需要 Page.Metadata.Name）
+			if value, ok := app.haloPageMap.Load(slug); ok {
+				app.haloPageMap.Store(typechoPage.Cid, value)
+			}
+			continue
+		}
 
 		content := cast.ToString(typechoPage.Text)
 		for _, typechoAttachment := range app.typechoAttachments {
@@ -289,6 +434,7 @@ func (app *App) migratePages() error {
 		}
 
 		app.haloPageMap.Store(typechoPage.Cid, haloPage)
+		app.haloPageSlugMap.Store(slug, true)
 	}
 
 	return nil
@@ -441,145 +587,53 @@ func NewAction(name string, do func() error) *Action {
 	}
 }
 
-// extractFirstImage 从Markdown内容中提取第一张远程图片URL
-// 支持格式: ![alt](url) 和 <img src="url">
-// 只返回以 http:// 或 https:// 开头的远程图片URL
-// 如果没有找到远程图片，返回空字符串
+var (
+	// 匹配 ![alt](url) 和 ![alt](url "title")
+	mdImageRe = regexp.MustCompile(`!\[[^\]]*\]\((https?://[^\s\)]+?)(?:\s+"[^"]*")?\)`)
+	// 匹配 <img src="url"> 和 <img src='url'>
+	htmlImgRe = regexp.MustCompile(`<img[^>]+src=["'](https?://[^"']+)["']`)
+)
+
+// extractFirstImage 从内容中提取第一张远程图片URL作为封面图
+// 支持格式: ![alt](url)、![alt](url "title") 和 <img src="url">
+// 只返回以 http:// 或 https:// 开头的远程图片URL，未找到返回空字符串
 func extractFirstImage(content string) string {
-	// 1. 匹配Markdown图片: ![...](http://...)
-	mdPattern := `!\[.*?\]\((https?://[^\)]+)\)`
-	if matches := findStringSubmatch(content, mdPattern); len(matches) > 1 {
-		url := matches[1]
-		if isImageUrl(url) {
-			return url
+	// 1. 优先匹配 Markdown 图片
+	if matches := mdImageRe.FindStringSubmatch(content); len(matches) > 1 {
+		if isImageUrl(matches[1]) {
+			return matches[1]
 		}
 	}
-	
-	// 2. 匹配HTML img标签: <img src="http://...">
-	htmlPattern := `<img[^>]+src=["'](https?://[^"']+)["']`
-	if matches := findStringSubmatch(content, htmlPattern); len(matches) > 1 {
-		url := matches[1]
-		if isImageUrl(url) {
-			return url
+	// 2. 其次匹配 HTML img 标签
+	if matches := htmlImgRe.FindStringSubmatch(content); len(matches) > 1 {
+		if isImageUrl(matches[1]) {
+			return matches[1]
 		}
 	}
-	
 	return ""
 }
 
 // isImageUrl 检查URL是否是图片链接
+// 先剥离 ?query 和 CDN后缀（如 !water），再用 HasSuffix 判断路径后缀
 func isImageUrl(url string) bool {
 	lowerUrl := strings.ToLower(url)
-	// 常见的图片后缀
-	imageExts := []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico"}
+	// 去除 ? 后面的查询参数
+	pathPart := lowerUrl
+	if qIdx := strings.Index(pathPart, "?"); qIdx != -1 {
+		pathPart = pathPart[:qIdx]
+	}
+	// 去除 CDN 后缀参数，如 .webp!water
+	if bangIdx := strings.Index(pathPart, "!"); bangIdx != -1 {
+		pathPart = pathPart[:bangIdx]
+	}
+	// 用 HasSuffix 判断路径是否以图片后缀结尾
+	imageExts := []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".ico", ".avif", ".heic"}
 	for _, ext := range imageExts {
-		if strings.HasSuffix(lowerUrl, ext) {
+		if strings.HasSuffix(pathPart, ext) {
 			return true
 		}
 	}
-	// 如果没有后缀，但包含图片相关关键词，也认为是图片
-	if strings.Contains(lowerUrl, ".jpg") || 
-	   strings.Contains(lowerUrl, ".png") || 
-	   strings.Contains(lowerUrl, ".gif") ||
-	   strings.Contains(lowerUrl, "image") {
-		return true
-	}
-	// 排除已知的非图片文件
-	nonImageExts := []string{".js", ".css", ".pdf", ".zip", ".tar", ".gz", ".doc", ".docx"}
-	for _, ext := range nonImageExts {
-		if strings.HasSuffix(lowerUrl, ext) {
-			return false
-		}
-	}
-	// 默认情况下，如果是远程URL且没有明确的后缀，也认为是图片（可能是动态图片链接）
-	return true
-}
-
-// findStringSubmatch 简单的正则匹配辅助函数
-func findStringSubmatch(content, pattern string) []string {
-	// 使用strings进行简单匹配，避免引入regexp包
-	// 匹配 ![alt](url) 格式
-	if strings.Contains(pattern, `!\[`) {
-		startIdx := strings.Index(content, `![`)
-		for startIdx != -1 {
-			// 找到对应的 ](
-			midIdx := strings.Index(content[startIdx:], `](`)
-			if midIdx == -1 {
-				break
-			}
-			midIdx += startIdx + 2
-			
-			// 找到对应的 )
-			endIdx := strings.Index(content[midIdx:], `)`)
-			if endIdx == -1 {
-				break
-			}
-			endIdx += midIdx
-			
-			url := content[midIdx:endIdx]
-			// 检查是否是远程URL
-			if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-				// 排除常见的非图片后缀
-				lowerUrl := strings.ToLower(url)
-				if !strings.HasSuffix(lowerUrl, ".js") && 
-				   !strings.HasSuffix(lowerUrl, ".css") &&
-				   !strings.HasSuffix(lowerUrl, ".pdf") {
-					return []string{"", url}
-				}
-			}
-			
-			// 继续查找下一个
-			content = content[endIdx:]
-			startIdx = strings.Index(content, `![`)
-		}
-	}
-	
-	// 匹配 <img src="url"> 格式
-	if strings.Contains(pattern, `<img`) {
-		lowerContent := strings.ToLower(content)
-		startIdx := strings.Index(lowerContent, `<img`)
-		for startIdx != -1 {
-			// 找到 src=" 或 src='
-			srcIdx := strings.Index(lowerContent[startIdx:], `src=`)
-			if srcIdx == -1 {
-				break
-			}
-			srcIdx += startIdx + 4
-			
-			// 确定引号类型
-			quoteChar := lowerContent[srcIdx]
-			if quoteChar != '"' && quoteChar != '\'' {
-				// 跳过这个img标签
-				lowerContent = lowerContent[srcIdx:]
-				startIdx = strings.Index(lowerContent, `<img`)
-				continue
-			}
-			
-			urlStart := srcIdx + 1
-			urlEnd := strings.Index(lowerContent[urlStart:], string(quoteChar))
-			if urlEnd == -1 {
-				break
-			}
-			urlEnd += urlStart
-			
-			url := content[urlStart:urlEnd]
-			// 检查是否是远程URL
-			if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-				lowerUrl := strings.ToLower(url)
-				if !strings.HasSuffix(lowerUrl, ".js") && 
-				   !strings.HasSuffix(lowerUrl, ".css") &&
-				   !strings.HasSuffix(lowerUrl, ".pdf") {
-					return []string{"", url}
-				}
-			}
-			
-			// 继续查找下一个
-			lowerContent = lowerContent[urlEnd:]
-			startIdx = strings.Index(lowerContent, `<img`)
-		}
-	}
-	
-	return nil
+	return false
 }
 
 func (app *App) doActions(actions []*Action) error {

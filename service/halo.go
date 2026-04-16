@@ -95,6 +95,38 @@ func NewHalo(conf *config.Halo) *Halo {
 	return h
 }
 
+func (halo *Halo) GetTags() ([]extensionsdk.Tag, error) {
+	result, _, err := halo.extension.TagV1alpha1API.ListTag(context.Background()).Page(1).Size(0).Execute()
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+func (halo *Halo) GetCategories() ([]extensionsdk.Category, error) {
+	result, _, err := halo.extension.CategoryV1alpha1API.ListCategory(context.Background()).Page(1).Size(0).Execute()
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+func (halo *Halo) GetPosts() ([]consolesdk.ListedPost, error) {
+	result, _, err := halo.console.PostV1alpha1ConsoleAPI.ListPosts(context.Background()).Page(1).Size(0).Execute()
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
+func (halo *Halo) GetPages() ([]consolesdk.ListedSinglePage, error) {
+	result, _, err := halo.console.SinglePageV1alpha1ConsoleAPI.ListSinglePages(context.Background()).Page(1).Size(0).Execute()
+	if err != nil {
+		return nil, err
+	}
+	return result.Items, nil
+}
+
 func (halo *Halo) AddTag(name, slug string) (*extensionsdk.Tag, error) {
 	result, _, err := halo.extension.TagV1alpha1API.CreateTag(context.Background()).Tag(extensionsdk.Tag{
 		ApiVersion: apiVersion,
