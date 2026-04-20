@@ -9,18 +9,18 @@
 > | 版本                                              | 适合谁                    | 附件迁移  | 头图提取    |
 > | ------------------------------------------------- | ------------------------- | --------- | ----------- |
 > | [原项目](https://github.com/fghwett/typecho_to_halo) | 图片存在本地服务器        | ✅ 支持   | ❌ 不支持   |
-> | **本修改版**                                | 图片存在又拍云/七牛云/OSS | ❌ 已禁用 | ✅ 自动提取 |
+> | **[本项目 (ty2halo)](https://github.com/NoEggEgg/ty2halo)** | 图片存在又拍云/七牛云/OSS | ❌ 已禁用 | ✅ 自动提取 |
 >
 > **一句话判断**：图片地址是 `https://你的域名/...` → 用原项目；是 `https://cdn.xxx.com/...` → 用本版本
 
 ## 能迁什么
 
-- ✅ 标签
-- ✅ 多级分类
+- ✅ 标签（自动去重，避免重复创建）
+- ✅ 多级分类（自动去重，保留层级结构）
 - ❌ 附件（已禁用，远程图片保留原链接）
-- ✅ 文章（自动提取第一张远程图片作为封面）
-- ✅ 页面
-- ✅ 多级评论（自动过滤垃圾评论）
+- ✅ 文章（自动提取第一张远程图片作为封面，自动去重）
+- ✅ 页面（自动去重）
+- ✅ 多级评论（自动过滤垃圾评论，保留层级关系）
 
 ## 使用前准备
 
@@ -45,7 +45,7 @@
 
 ```bash
 git clone https://github.com/NoEggEgg/ty2halo.git
-cd typecho_to_halo
+cd ty2halo
 ```
 
 ### 2. 配置
@@ -62,20 +62,21 @@ vim config.yaml
 
 ```yaml
 typecho:
-  type: mysql
-  baseUrl: https://your-domain.com/  # 必须以斜杠结尾
-  dsn: "username:password@tcp(host:port)/dbname?charset=utf8mb4&parseTime=True&loc=Local"
-  
+  type: mysql # 数据库类型 gorm支持范围
+  baseUrl: https://your-domain.com/ # 必须以斜杠结尾
+  dsn: {username}:{password}@tcp({ip}:{port})/{db_name}?charset=utf8mb4&parseTime=True&loc=Local # 修改数据库配置
+  prefix: typecho_ # 数据库表前缀，默认为 typecho_
+
 halo:
-  host: your-halo-host:8090
-  schema: http
-  token: "your-pat-token"
-  debug: false
-  policyName: default-policy
-  groupName: ""
+  host: domain:port # 域名（包含端口）
+  schema: https # 协议
+  token: {个人token} # Personal Access Token，权限要给足
+  debug: false # 是否打印SDK日志
+  policyName: default-policy # 默认存储策略
+  groupName: "" # 文件分组名称，默认留空
 
 fileManager:
-  dir: ./_tmp/
+  dir: ./_tmp/ # 文件缓存目录
 ```
 
 ### 3. 编译运行
@@ -143,11 +144,12 @@ task gen-db
 
 1. **禁用附件迁移** - `apps/migrate/app.go` 中注释掉附件迁移 action
 2. **添加头图提取** - 新增 `extractFirstImage` 函数，自动提取文章第一张远程图片作为封面
+3. **数据去重检查** - 添加 `loadExistingData()` 函数，迁移前预加载 Halo 已有数据，通过 slug 对比避免重复创建标签、分类、文章和页面
 
 ## 常见问题
 
 **Q: 迁移后标签/分类重复了？**
-A: 工具没做重复检测，多次运行会重复导入。在 Halo 后台删了重跑，或修改代码跳过已存在的数据。
+A: 工具已添加数据去重检查，会先查询 Halo 中已存在的数据（通过 slug 对比），避免重复导入。但如果手动删除 Halo 数据后重新迁移，仍然会正常导入。
 
 **Q: 报错 `lookup xxx.comfiles: no such host`？**
 A: `baseUrl` 必须以 `/` 结尾，比如 `https://example.com/`
