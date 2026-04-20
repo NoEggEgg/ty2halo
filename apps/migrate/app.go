@@ -441,6 +441,9 @@ func (app *App) migratePages() error {
 }
 
 func (app *App) migrateComments() error {
+	// 自动继续评论迁移（跳过用户确认）
+	slog.Info("开始迁移评论...")
+
 	allTypechoComments, err := app.typecho.GetComments()
 	if err != nil {
 		return err
@@ -488,6 +491,21 @@ func (app *App) migrateComments() error {
 			continue
 		}
 
+		// 记录字段状态，帮助诊断信息缺失问题
+		ip := cast.ToString(typechoComment.IP)
+		agent := cast.ToString(typechoComment.Agent)
+		created := cast.ToInt64(typechoComment.Created)
+		
+		if typechoComment.IP == nil {
+			slog.Warn("评论IP字段为nil，将使用空字符串", slog.Uint64("coid", uint64(typechoComment.Coid)))
+		}
+		if typechoComment.Agent == nil {
+			slog.Warn("评论Agent字段为nil，将使用空字符串", slog.Uint64("coid", uint64(typechoComment.Coid)))
+		}
+		if typechoComment.Created == nil || created <= 0 {
+			slog.Warn("评论Created字段无效，将使用当前时间作为默认值", slog.Uint64("coid", uint64(typechoComment.Coid)), slog.Int64("created", created))
+		}
+
 		var haloComment *consolesdk.Comment
 		if haloComment, err = app.halo.AddComment(
 			contentName,
@@ -496,7 +514,10 @@ func (app *App) migrateComments() error {
 			cast.ToString(typechoComment.URL),
 			cast.ToString(typechoComment.Text),
 			cast.ToString(typechoComment.Status),
+			ip,
+			agent,
 			isPost,
+			created,
 		); err != nil {
 			return err
 		}
@@ -518,6 +539,21 @@ func (app *App) migrateComments() error {
 				continue
 			}
 			for _, typechoReply := range typechoReplyList {
+				// 记录字段状态，帮助诊断信息缺失问题
+				replyIp := cast.ToString(typechoReply.IP)
+				replyAgent := cast.ToString(typechoReply.Agent)
+				replyCreated := cast.ToInt64(typechoReply.Created)
+				
+				if typechoReply.IP == nil {
+					slog.Warn("回复IP字段为nil，将使用空字符串", slog.Uint64("coid", uint64(typechoReply.Coid)))
+				}
+				if typechoReply.Agent == nil {
+					slog.Warn("回复Agent字段为nil，将使用空字符串", slog.Uint64("coid", uint64(typechoReply.Coid)))
+				}
+				if typechoReply.Created == nil || replyCreated <= 0 {
+					slog.Warn("回复Created字段无效，将使用当前时间作为默认值", slog.Uint64("coid", uint64(typechoReply.Coid)), slog.Int64("created", replyCreated))
+				}
+				
 				parentCommentId := cast.ToUint32(typechoReply.Parent)
 				var commentName, quoteComment string
 				if value, exist := app.haloCommentMap.Load(parentCommentId); exist {
@@ -556,6 +592,9 @@ func (app *App) migrateComments() error {
 					cast.ToString(typechoReply.URL),
 					cast.ToString(typechoReply.Text),
 					quoteComment,
+					replyIp,      // 使用局部变量
+					replyAgent,   // 使用局部变量
+					replyCreated, // 使用局部变量
 				); err != nil {
 					return err
 				}
