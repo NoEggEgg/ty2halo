@@ -97,7 +97,7 @@ func NewHalo(conf *config.Halo) *Halo {
 }
 
 func (halo *Halo) GetTags() ([]extensionsdk.Tag, error) {
-	result, _, err := halo.extension.TagV1alpha1API.ListTag(context.Background()).Page(1).Size(0).Execute()
+	result, _, err := halo.extension.TagV1alpha1API.ListTag(context.Background()).Page(1).Size(10000).Execute()
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +105,7 @@ func (halo *Halo) GetTags() ([]extensionsdk.Tag, error) {
 }
 
 func (halo *Halo) GetCategories() ([]extensionsdk.Category, error) {
-	result, _, err := halo.extension.CategoryV1alpha1API.ListCategory(context.Background()).Page(1).Size(0).Execute()
+	result, _, err := halo.extension.CategoryV1alpha1API.ListCategory(context.Background()).Page(1).Size(10000).Execute()
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +113,7 @@ func (halo *Halo) GetCategories() ([]extensionsdk.Category, error) {
 }
 
 func (halo *Halo) GetPosts() ([]consolesdk.ListedPost, error) {
-	result, _, err := halo.console.PostV1alpha1ConsoleAPI.ListPosts(context.Background()).Page(1).Size(0).Execute()
+	result, _, err := halo.console.PostV1alpha1ConsoleAPI.ListPosts(context.Background()).Page(1).Size(10000).Execute()
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (halo *Halo) GetPosts() ([]consolesdk.ListedPost, error) {
 }
 
 func (halo *Halo) GetPages() ([]consolesdk.ListedSinglePage, error) {
-	result, _, err := halo.console.SinglePageV1alpha1ConsoleAPI.ListSinglePages(context.Background()).Page(1).Size(0).Execute()
+	result, _, err := halo.console.SinglePageV1alpha1ConsoleAPI.ListSinglePages(context.Background()).Page(1).Size(10000).Execute()
 	if err != nil {
 		return nil, err
 	}
