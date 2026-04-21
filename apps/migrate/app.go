@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"bufio"
 	consolesdk "api.halo.run/apis/openapi-go-console"
 	extensionsdk "api.halo.run/apis/openapi-go-extension"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"github.com/fghwett/typecho-to-halo/service"
 	"github.com/spf13/cast"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -69,16 +71,42 @@ func (app *App) Run() error {
 		slog.Warn("加载已有数据失败，跳过去重检查", slog.Any("err", err))
 	}
 
-	actions := []*Action{
+	// 执行标签、分类、文章、页面迁移
+	preActions := []*Action{
 		NewAction("迁移标签", app.migrateTags),
 		NewAction("迁移分类", app.migrateCategories),
-		// NewAction("迁移附件", app.migrateAttachments),
 		NewAction("迁移文章", app.migratePosts),
 		NewAction("迁移页面", app.migratePages),
-		NewAction("迁移评论", app.migrateComments),
 	}
 
-	return app.doActions(actions)
+	if err := app.doActions(preActions); err != nil {
+		return err
+	}
+
+	// 评论迁移前询问确认
+	if !app.askConfirm("是否进行评论迁移？") {
+		slog.Info("用户取消评论迁移，程序继续运行...")
+	} else {
+		if err := app.migrateComments(); err != nil {
+			slog.Error("评论迁移失败", slog.Any("err", err))
+			// 不返回错误，让程序继续运行
+		}
+	}
+
+	// 程序不自动退出，等待用户操作
+	slog.Info("=" + strings.Repeat("=", 50))
+	slog.Info("迁移完成！按 Enter 键退出...")
+	bufio.NewReader(os.Stdin).ReadLine()
+
+	return nil
+}
+
+func (app *App) askConfirm(prompt string) bool {
+	fmt.Print("\n" + prompt + " (y/N): ")
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(strings.ToLower(input))
+	return input == "y" || input == "yes"
 }
 
 func (app *App) loadExistingData() error {
